@@ -52,6 +52,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const frameRef = useRef<HTMLIFrameElement>(null);
   const dragDepth = useRef(0);
   const lastBeat = useRef(0);
+  const lastImeError = useRef(0);
 
   const inst = instances.find((i) => i.id === id);
   // 进入实例时，共享列表可能尚未同步（管理页新建/安装后），先按"探测中"显示加载态，
@@ -260,10 +261,98 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
       st.textContent =
         '#noVNC_control_bar_anchor{z-index:2147483647!important;}' +
         '#noVNC_control_bar{background:rgba(18,22,30,.96)!important;border:1px solid rgba(255,255,255,.55)!important;box-shadow:0 0 24px rgba(0,0,0,.55)!important;}' +
-        '#noVNC_control_bar_handle{opacity:1!important;background:rgba(18,22,30,.96)!important;border:1px solid rgba(255,255,255,.5)!important;}';
+        '#noVNC_control_bar_handle{opacity:1!important;background:rgba(18,22,30,.96)!important;border:1px solid rgba(255,255,255,.5)!important;}' +
+        // macOS 中文输入法需要目标元素有非零尺寸才能激活；KasmVNC 默认 0x0 导致无法切换输入法
+        '#noVNC_keyboardinput{width:1px!important;height:1px!important;opacity:0!important;overflow:hidden!important;}';
       (doc.head || doc.documentElement).appendChild(st);
     } catch {
       /* 同源正常不会到这 */
+    }
+  };
+
+  // 中文 IME 输入修复：绕过 VNC XKB keysym 容量限制（~21 个 CJK 字符后 keymap 满，输入全废）。
+  // 根因：KasmVNC 的 Perl 补丁在 compositionend 发 CJK keysym，但紧随其后的 _handleInput
+  // diff 逻辑会发 Backspace 清拼音，把刚发的字也删了。必须在捕获阶段拦截，阻止 Perl 补丁执行，
+  // 手动重置内部状态（防止 _handleInput 发 Backspace），然后通过 API 用 xdotool 粘贴文字。
+  const patchVncIme = () => {
+    try {
+      const doc = frameRef.current?.contentDocument;
+      if (!doc || doc.getElementById('woc-ime-patch')) return;
+      const ta = doc.getElementById('noVNC_keyboardinput') as HTMLTextAreaElement | null;
+      if (!ta) return;
+      const win = frameRef.current?.contentWindow as any;
+      let imeComposing = false;
+      let swallowInputUntil = 0;
+      const keyboard = () => {
+        const cv = doc.querySelector('canvas') as any;
+        return win?.UI?.rfb?.keyboard || cv?._rfb?.keyboard || null;
+      };
+      const installKeyboardGuard = () => {
+        const kb = keyboard() as any;
+        if (!kb || kb._wocImeGuard || typeof kb._sendKeyEvent !== 'function') return;
+        const original = kb._sendKeyEvent.bind(kb);
+        kb._wocImeGuard = true;
+        if (typeof kb._wocImeSuppressUnicode !== 'boolean') kb._wocImeSuppressUnicode = false;
+        kb._sendKeyEvent = (keysym: number, ...args: any[]) => {
+          if (kb._wocImeSuppressUnicode && typeof keysym === 'number' && keysym >= 0x01000000) return;
+          return original(keysym, ...args);
+        };
+      };
+      const syncKeyboardInput = (value: string) => {
+        try {
+          installKeyboardGuard();
+          const kb = keyboard();
+          if (kb) {
+            kb._imeInProgress = false;
+            kb._imeHold = false;
+            kb._lastKeyboardInput = value;
+            if (kb._rfbKeyQueue) kb._rfbKeyQueue.length = 0;
+          }
+        } catch { /* ignore */ }
+      };
+      const swallowNoVncInput = (e: Event) => {
+        if (!imeComposing && Date.now() > swallowInputUntil) return;
+        e.stopImmediatePropagation();
+        syncKeyboardInput((e.target as HTMLTextAreaElement).value);
+      };
+      ta.addEventListener('compositionstart', (e) => {
+        imeComposing = true;
+        const kb = keyboard() as any;
+        if (kb) kb._wocImeSuppressUnicode = true;
+        e.stopImmediatePropagation();
+        syncKeyboardInput((e.target as HTMLTextAreaElement).value);
+      }, true);
+      ta.addEventListener('beforeinput', swallowNoVncInput, true);
+      ta.addEventListener('input', swallowNoVncInput, true);
+      ta.addEventListener('compositionend', (e) => {
+        const text = (e as CompositionEvent).data;
+        if (!text || !id) return;
+        imeComposing = false;
+        swallowInputUntil = Date.now() + 300;
+        e.stopImmediatePropagation(); // 阻止 KasmVNC 原生 IME 路径再发一遍 keysym
+        const kb = keyboard() as any;
+        if (kb) kb._wocImeSuppressUnicode = true;
+        syncKeyboardInput((e.target as HTMLTextAreaElement).value);
+        window.setTimeout(() => {
+          ta.value = '';
+          syncKeyboardInput('');
+          const kb = keyboard() as any;
+          if (kb) kb._wocImeSuppressUnicode = false;
+        }, 0);
+        // 通过面板 API → xdotool 在容器内粘贴，完全绕过 VNC keysym
+        api.typeInInstance(id, text).catch((err) => {
+          const now = Date.now();
+          if (now - lastImeError.current > 3000) {
+            lastImeError.current = now;
+            toast(err?.message || '中文输入失败，请确认实例镜像包含 xclip/xdotool', 'error');
+          }
+        });
+      }, true); // capture：先于 Perl 补丁的 bubble handler
+      const mark = doc.createElement('meta');
+      mark.id = 'woc-ime-patch';
+      (doc.head || doc.documentElement).appendChild(mark);
+    } catch {
+      /* ignore */
     }
   };
 
@@ -472,6 +561,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
               setTimeout(() => {
                 focusFrame(); // 加载完把键盘焦点交给 VNC（宿主机输入法）
                 injectVncStyle(); // 让原生控制条在深色背景下可见
+                patchVncIme(); // 修复中文 IME 吞字（绕过 VNC XKB keysym 限制）
               }, 500);
             }}
           />

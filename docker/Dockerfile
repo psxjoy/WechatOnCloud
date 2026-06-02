@@ -15,7 +15,7 @@ RUN set -eux; \
         curl ca-certificates locales dpkg \
         fonts-wqy-zenhei fonts-wqy-microhei fonts-noto-cjk fonts-noto-color-emoji \
         libnss3 libgbm1 libasound2 libxss1 \
-        xdotool; \
+        xdotool xclip; \
     sed -i 's/# zh_CN.UTF-8 UTF-8/zh_CN.UTF-8 UTF-8/' /etc/locale.gen; \
     locale-gen; \
     apt-get clean; \

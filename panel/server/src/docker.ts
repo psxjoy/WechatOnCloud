@@ -170,7 +170,7 @@ export async function instanceRuntime(inst: Instance): Promise<RuntimeState> {
   }
 }
 
-// 在实例容器内执行命令，返回 stdout（demux 后只取标准输出）。
+// 在实例容器内执行命令，返回 stdout；若命令失败，把 stderr 透出给调用方。
 async function execCapture(inst: Instance, cmd: string[]): Promise<string> {
   const c = docker.getContainer(inst.containerName);
   const exec = await c.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: false, User: 'abc' });
@@ -181,7 +181,18 @@ async function execCapture(inst: Instance, cmd: string[]): Promise<string> {
     const stdout = { write: (b: Buffer) => { out += b.toString('utf8'); } } as any;
     const stderr = { write: (b: Buffer) => { err += b.toString('utf8'); } } as any;
     docker.modem.demuxStream(stream, stdout, stderr);
-    stream.on('end', () => resolve(out || err));
+    stream.on('end', async () => {
+      try {
+        const info = await exec.inspect();
+        if (info.ExitCode && info.ExitCode !== 0) {
+          reject(new Error((err || out || `命令执行失败，退出码 ${info.ExitCode}`).trim()));
+          return;
+        }
+        resolve(out || err);
+      } catch (e) {
+        reject(e);
+      }
+    });
     stream.on('error', reject);
   });
 }
@@ -326,6 +337,23 @@ export async function instanceLogs(inst: Instance, tail = 600): Promise<string> 
     i += 8 + size;
   }
   return out || buf.toString('utf8'); // 兜底：TTY 模式非多路复用
+}
+
+// 通过 xdotool 在实例容器内输入文字（绕过 VNC keysym 限制，解决中文 IME 吞字问题）。
+// 用 base64 传递文本避免 shell 转义问题，xclip 写入剪贴板后 xdotool 模拟 Ctrl+V 粘贴。
+export async function typeInInstance(inst: Instance, text: string): Promise<void> {
+  const b64 = Buffer.from(text, 'utf8').toString('base64');
+  const cmd = [
+    'set -e',
+    'display="${DISPLAY:-}"',
+    'if [ -z "$display" ]; then for x in /tmp/.X11-unix/X*; do [ -e "$x" ] || continue; display=":${x##*X}"; break; done; fi',
+    'export DISPLAY="${display:-:1}"',
+    'command -v xclip >/dev/null 2>&1 || { echo "xclip not installed in instance image" >&2; exit 127; }',
+    'command -v xdotool >/dev/null 2>&1 || { echo "xdotool not installed in instance image" >&2; exit 127; }',
+    `echo '${b64}' | base64 -d | xclip -selection clipboard -i`,
+    'xdotool key --clearmodifiers ctrl+v',
+  ].join('; ');
+  await execCapture(inst, ['bash', '-c', cmd]);
 }
 
 // 实例容器名（供反代构造 target）。

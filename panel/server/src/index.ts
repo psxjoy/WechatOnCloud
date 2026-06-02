@@ -46,6 +46,7 @@ import {
   downloadFromInstance,
   deleteInstanceFile,
   instanceLogs,
+  typeInInstance,
 } from './docker.js';
 import { createSession, getSession, destroySession, destroyUserSessions } from './sessions.js';
 
@@ -436,6 +437,22 @@ app.post('/api/instances/:id/control/take', async (req, reply) => {
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
   controlHolders.set(id, { userId: u.id, username: u.username, at: Date.now() });
   return { mine: true, holder: u.username };
+});
+
+// 通过 xdotool 在实例容器内输入文字（绕过 VNC XKB keysym 容量限制，修复中文 IME 吞字）
+app.post('/api/instances/:id/type', async (req, reply) => {
+  const u = requireAuth(req, reply);
+  if (!u) return;
+  const id = (req.params as any).id;
+  if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  const { text } = (req.body as any) ?? {};
+  if (!text || typeof text !== 'string' || text.length > 500) return reply.code(400).send({ error: '文字为空或过长' });
+  try {
+    await typeInInstance(findInstance(id)!, text);
+    return { ok: true };
+  } catch (e: any) {
+    return reply.code(500).send({ error: e?.message || '输入失败' });
+  }
 });
 
 // 查看实例容器日志（仅管理员）：排查"无法进入/未安装/卡死"等。inline 文本，浏览器可直接看/另存。

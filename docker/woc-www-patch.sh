@@ -2,10 +2,9 @@
 # 构建期补丁：改 KasmVNC web 客户端的 webpack 产物 dist/*.bundle.js
 #   (1) 默认开启 IME 输入模式（本地输入法打中文，成品汉字发进容器，容器内不装 IME）
 #   (2) 修复 noVNC 的中文 IME 输入：原实现靠"隐藏 textarea 差分→逐字符重发 keysym"，
-#       会在合成过程中把中间拼音也发给远端、且永不 reset 导致累积+退格风暴，
-#       在 VNC 上表现为大量丢字、~21 字后卡住、跨浏览器不稳定。
-#       改为：合成期间(input)一律不发；只在 compositionend 用 e.data(最终上屏串)逐字发 keysym，
-#       提交后 reset textarea，并吞掉紧随其后的提交 input 事件，避免重复发送/跨分支竞争。
+#       会在合成过程中把中间拼音也发给远端、且永不 reset 导致累积+退格风暴；
+#       改为合成期间和提交时都只同步内部 textarea 状态，不再发送中文 keysym。
+#       最终成品文本由面板前端捕获后通过 xclip/xdotool 粘贴，绕过 KasmVNC XKB keysym 限制。
 # 末尾断言：若 base 镜像换了打包结构、一个文件都没改到，则构建失败而非静默放过。
 set -euo pipefail
 
