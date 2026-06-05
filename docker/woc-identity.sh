@@ -40,4 +40,21 @@ printf '%s\n' "$MID" > /var/lib/dbus/machine-id 2>/dev/null || true
 # 抹掉最明显的容器标记（微信可能据此判定非真实桌面）。/.dockerenv 由 docker 注入，删掉无副作用。
 rm -f /.dockerenv 2>/dev/null || true
 
-echo "[woc-identity] machine-id 已设为本实例专属（持久化于数据卷）"
+# 设备伪装：把 /etc/os-release 改成 deepin（微信官方支持的发行版；Deepin 本就基于 Debian，
+# 与本镜像的 Debian 用户态一致，不自相矛盾）。面板按 WOC_SPOOF_OS 控制（默认开，=0 关）。
+# /etc/os-release 是指向 /usr/lib/os-release 的软链，重定向会写穿到目标，故直接写它即可。
+if [ "${WOC_SPOOF_OS:-1}" = "1" ]; then
+    cat > /etc/os-release <<'OSEOF'
+PRETTY_NAME="deepin 23"
+NAME="deepin"
+VERSION_ID="23"
+VERSION="23"
+VERSION_CODENAME=beige
+ID=deepin
+ID_LIKE=debian
+HOME_URL="https://www.deepin.org/"
+BUG_REPORT_URL="https://bbs.deepin.org/"
+OSEOF
+fi
+
+echo "[woc-identity] machine-id 已设为本实例专属（持久化于数据卷）；os 伪装=${WOC_SPOOF_OS:-1}"
