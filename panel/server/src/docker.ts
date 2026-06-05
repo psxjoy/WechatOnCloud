@@ -165,6 +165,26 @@ export async function upgradeInstance(inst: Instance): Promise<void> {
   await runInstance(inst);
 }
 
+// 重置实例的设备 machine-id：删掉持久化的 .woc-machine-id 后重启，由 00-woc-identity 钩子重新生成
+// 一个全新的唯一值（相当于"换一台新设备"）。用于某账号被腾讯风控标记后手动滚新设备身份。
+// 仅对含身份钩子的新镜像有效；旧镜像（升级前）无钩子，先 throw 提示升级，避免做无用功。
+export async function regenInstanceMachineId(inst: Instance): Promise<void> {
+  const hasHook = (
+    await execCapture(inst, [
+      'sh',
+      '-c',
+      'test -f /custom-cont-init.d/00-woc-identity && echo yes || echo no',
+    ])
+  ).trim();
+  if (hasHook !== 'yes') {
+    throw new Error('该实例运行的是旧镜像（无设备身份模块），请先「升级实例」后再重置设备 ID');
+  }
+  // 删除持久化文件；重启时钩子检测到缺失 → 生成新的唯一 machine-id 并写回卷
+  await execCapture(inst, ['sh', '-c', 'rm -f /config/.woc-machine-id']);
+  await stopInstance(inst);
+  await runInstance(inst);
+}
+
 // 停止实例容器（保留容器与数据卷，可再启动）。
 export async function stopInstance(inst: Instance): Promise<void> {
   try {
